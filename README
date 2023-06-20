@@ -1,5 +1,7 @@
 # Security P2
 
+## Read report/Report.org
+
 ## Create certificates
 ``` sh
 openssl genrsa -out server-key.pem 4096
