@@ -1,0 +1,126 @@
+import tls from 'tls';
+import fs from 'fs';
+import readline from 'readline';
+import { promisify } from 'util';
+
+import { createKeys, encrypt, decrypt } from './utils/crypto.js';
+
+const { publicKey, privateKey } = createKeys();
+let userkeylist = [];
+
+function encryptFor(username, text) {
+    for(const keyObj of userkeylist) {
+        if(keyObj.username === username) return encrypt(keyObj.publicKey, text);
+    }
+}
+
+function printUsersOnline() {
+    console.log('>> Users online:');
+    for(const user of userkeylist) {
+        console.log('>>   ', user.username);
+    }
+}
+
+const options = {
+    ca: [ fs.readFileSync('./cert/server-cert.pem') ]
+}
+
+const socket = tls.connect(8000, options);
+
+async function getUsername() {
+    const username = await question('Enter your username: ');
+    return username ? username : getUsername();
+}
+
+const template =
+    '\nTo message someone       - @<username> message\n' +
+    'To refresh public keys   - /refresh\n' +
+    'To exit                  - /exit\n';
+
+
+
+async function processLine(socket, line, username) {
+    if(line.startsWith('@')) {
+        const words = line.split(' ');
+        const receiver = words[0].trim().slice(1);
+        const text = words.slice(1).join(' ');
+        const encryptedText = encryptFor(receiver, text);
+        if(!encryptedText) {
+            console.log('>> User not online, try /refresh');
+            return;
+        }
+        return socket.write(createMsg(username, receiver, encryptedText));
+    }
+    else if(line.startsWith('/refresh')) {
+        return socket.write(JSON.stringify({
+            type: 'request'
+        }));
+    }
+    else if(line.startsWith('/exit')) {
+        socket.end();
+        rl.close();
+        process.exit(0);
+    }
+    else console.log(template)
+}
+
+async function onConnect() {
+    const username = await getUsername();
+    socket.write(JSON.stringify({ type: 'login', username, publicKey }));
+    console.log(template)
+    rl.on('line', async line => processLine(socket, line, username));
+}
+
+function onData(data) {
+    const message = JSON.parse(data);
+    if(message.type === 'warning') {
+        console.log('>> Server:', message.text);
+        return;
+    }
+    // receive public keys
+    if(message.type === 'keyinfo') {
+        const { list } = message;
+        userkeylist = list;
+        console.log('>> Keys refreshed!');
+        printUsersOnline();
+        return;
+    }
+    const { sender, text } = message;
+    const decryptedText = decrypt(privateKey, text);
+    console.log('>>', sender + ':', decryptedText);
+}
+
+socket.on('connect', onConnect);
+
+socket.on('data', onData);
+
+socket.on('error', err => {
+    console.log('Client error:', err);
+});
+
+socket.on('end', err => {
+    rl.close();
+    process.exit(0);
+});
+
+// -- utils --
+
+function createMsg(sender, receiver, text) {
+    return JSON.stringify({
+        sender, receiver, text,
+        date: new Date().toLocaleString(),
+        type: 'message'
+    });
+}
+
+const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: true,
+});
+
+rl.question[promisify.custom] = question => new Promise(resolve => {
+    rl.question(question, resolve);
+});
+
+const question = promisify(rl.question);

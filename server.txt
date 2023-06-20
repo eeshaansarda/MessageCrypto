@@ -1,0 +1,140 @@
+import tls from 'tls';
+import fs from 'fs';
+import User from './utils/User.js';
+
+const options = {
+    key: fs.readFileSync('./cert/server-key.pem'),
+    cert: fs.readFileSync('./cert/server-cert.pem')
+}
+
+let clients = [];
+
+function warn(text) {
+    return ({ type: 'warning', text });
+}
+
+function writeToAll(message, sender) {
+    if(sender) message.sender = sender.username;
+    clients.forEach(client => {
+        const json = JSON.stringify(message);
+        if (client !== sender) client.socket.write(json);
+    });
+}
+
+function disconnect(socket){
+    const failMsg = warn('Failed to access');
+    deleteUser(socket);
+    return socket.end(JSON.stringify(failMsg));
+}
+
+async function processMessage(socket, message) {
+    const { receiver } = message;
+    const client = findByField('username', receiver);
+    const sender = findByField('socket', socket);
+
+    // socket user isn't in users
+    if (!sender) return disconnect(socket);
+
+    if(!client) {
+        const errMsg = warn(`${receiver} is not online`);
+        socket.write(JSON.stringify(errMsg));
+        return console.log(errMsg);
+    }
+    else await sender.sendMessage(message, client);
+}
+
+function requestKeys(socket, data) {
+    const sender = findByField('socket', socket);
+
+    // socket user isn't in users
+    if (!sender) return disconnect(socket);
+
+    const keylist = [];
+    for(const client of clients) {
+        keylist.push({ username: client.username, publicKey: client.publicKey });
+    }
+    const listMsg = {
+        type: 'keyinfo',
+        list: keylist
+    };
+    socket.write(JSON.stringify(listMsg));
+}
+
+async function logIn(socket, data) {
+    // not using password anywhere
+    const { username, publicKey } = data;
+    if(findByField('username', username)) {
+        //user already exists
+        const err = warn(`${username} already exists!`);
+        socket.write(JSON.stringify(err));
+        disconnect(socket);
+        return;
+    }
+    const client = new User(username, publicKey, socket);
+    clients.push(client);
+    console.log(`${client.username} added to clients`);
+    const hello = warn(`Hello from server, ${username}!`);
+    socket.write(JSON.stringify(hello));
+    writeToAll(warn(`User connected: ${username}`), client);
+}
+
+function logout(socket) {
+    const user = findByField('socket', socket);
+    if(!user) return;
+    deleteUser(socket);
+    console.log(`User disconnected: ${user.username}`);
+    writeToAll(warn(`User disconnected: ${user.username}`));
+}
+
+// process messages using their functions
+const processors = {
+    login: logIn,
+    message: processMessage,
+    request: requestKeys,
+}
+
+function onConnection(socket) {
+    socket.setNoDelay(true);
+    //socket.on('data', onData(socket));
+    socket.on('data', (data) => {
+        const message = JSON.parse(data);
+        console.log(message);
+        const { type } = message;
+        const processor = processors[type];
+        return processor(socket, message);
+    });
+
+    socket.on('error', err => {
+        console.log('Socket error: ', err);
+    });
+
+    socket.on('end', () => {
+        logout(socket);
+    });
+}
+
+const server = tls.createServer(options, onConnection);
+
+server.on('error', err => {
+  console.log('Server error: ', err);
+});
+
+server.listen(8000, () => {
+    console.log('Server listening on 8000');
+});
+
+// -- lib.js --
+
+function findByField(fieldname, value) {
+    for(const user of clients) {
+        if(user[fieldname] === value) {
+           return user;
+        }
+    }
+}
+
+function deleteUser(socket) {
+    clients = clients.filter(user => {
+        return user.socket !== socket;
+    });
+}
